@@ -101,6 +101,16 @@ type config struct {
 	noChurn           bool
 }
 
+type wikiArtifacts struct {
+	depsEdgeCount int
+	fileCount     int
+	dirCount      int
+	symbolCount   int
+	hasChurn      bool
+	hasRecipes    bool
+	hasTraces     bool
+}
+
 type fileEntry struct {
 	Name     string
 	Language string
@@ -330,6 +340,83 @@ func main() {
 		regenCount++
 	}
 
+	// --- Sprint 005: Post-processing pipeline ---
+	var artifacts wikiArtifacts
+	artifacts.dirCount = len(dirs)
+
+	if !cfg.dryRun {
+		// Write dependency graph.
+		if !cfg.noDepsGraph {
+			edgeCount, err := writeDepsGraph(cfg, summaries)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  warning: deps graph generation failed: %v\n", err)
+			}
+			artifacts.depsEdgeCount = edgeCount
+		}
+
+		// Write file index.
+		if !cfg.noFileIndex {
+			fileCount, err := writeFileIndex(cfg, dirs, summaries)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  warning: file index generation failed: %v\n", err)
+			}
+			artifacts.fileCount = fileCount
+		}
+
+		// Write symbol index.
+		if !cfg.noSymbolIndex {
+			symbolCount, err := writeSymbolIndex(cfg, summaries)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  warning: symbol index generation failed: %v\n", err)
+			}
+			artifacts.symbolCount = symbolCount
+		}
+
+		// Git analysis: churn.
+		if !cfg.noChurn {
+			churnData, _ := analyzeChurn(cfg.repoRoot)
+			if len(churnData) > 0 {
+				if err := writeChurn(cfg, churnData); err != nil {
+					fmt.Fprintf(os.Stderr, "  warning: churn analysis failed: %v\n", err)
+				}
+				artifacts.hasChurn = true
+			}
+		}
+
+		// Git analysis: co-change + recipes.
+		if !cfg.noRecipes {
+			clusters, _ := analyzeCoChanges(cfg.repoRoot)
+			if len(clusters) > 0 {
+				emitProgress(cfg, progressEvent{Event: "write", Dir: ".", Message: "Generating modification recipes"})
+				if !cfg.jsonProgress {
+					fmt.Fprintln(os.Stderr, "Generating modification recipes...")
+				}
+				recipesContent, err := generateRecipes(cfg, clusters, summaries)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "  warning: recipe generation failed: %v\n", err)
+				} else if recipesContent != "" {
+					writeRecipesFile(cfg, recipesContent)
+					artifacts.hasRecipes = true
+				}
+			}
+		}
+
+		// Entry point traces.
+		if !cfg.noTraces {
+			emitProgress(cfg, progressEvent{Event: "write", Dir: ".", Message: "Generating entry point traces"})
+			if !cfg.jsonProgress {
+				fmt.Fprintln(os.Stderr, "Generating entry point traces...")
+			}
+			tracesContent, err := generateTraces(cfg, summaries)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  warning: trace generation failed: %v\n", err)
+			} else if tracesContent != "" {
+				writeTracesFile(cfg, tracesContent)
+				artifacts.hasTraces = true
+			}
+		}
+	}
+
 	// 5. Generate root overview and wiki.md.
 	if !cfg.dryRun {
 		// Collect top-level dirs for root overview.
@@ -355,7 +442,7 @@ func main() {
 		if !cfg.jsonProgress {
 			fmt.Fprintln(os.Stderr, "Generating wiki.md...")
 		}
-		wiki := buildWiki(cfg, dirs, summaries, rootOverview)
+		wiki := buildWiki(cfg, dirs, summaries, rootOverview, artifacts)
 		wikiPath := filepath.Join(cfg.wikiRoot, "wiki.md")
 		if err := os.WriteFile(wikiPath, []byte(wiki), 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing wiki.md: %v\n", err)
@@ -1856,7 +1943,7 @@ func writeTracesFile(cfg config, content string) error {
 // Wiki generation
 // ---------------------------------------------------------------------------
 
-func buildWiki(cfg config, dirs []string, summaries map[string]string, rootOverview string) string {
+func buildWiki(cfg config, dirs []string, summaries map[string]string, rootOverview string, artifacts wikiArtifacts) string {
 	var sb strings.Builder
 	sb.WriteString(generatedTag + "\n")
 	sb.WriteString("# Codebase Wiki\n\n")
@@ -1890,7 +1977,28 @@ func buildWiki(cfg config, dirs []string, summaries map[string]string, rootOverv
 			sb.WriteString(fmt.Sprintf("- [%s/](./%s/SUMMARY.md)\n", d, d))
 		}
 	}
-	sb.WriteString("\n---\n\n")
+	sb.WriteString("\n")
+
+	// Root artifact links.
+	if !cfg.noDepsGraph && artifacts.depsEdgeCount > 0 {
+		sb.WriteString(fmt.Sprintf("## Dependency graph\n\n%d directories with dependency edges. [Full graph →](./deps-graph.md)\n\n", artifacts.depsEdgeCount))
+	}
+	if !cfg.noFileIndex && artifacts.fileCount > 0 {
+		sb.WriteString(fmt.Sprintf("## File index\n\n%d source files across %d directories. [Full index →](./file-index.md)\n\n", artifacts.fileCount, artifacts.dirCount))
+	}
+	if !cfg.noSymbolIndex && artifacts.symbolCount > 0 {
+		sb.WriteString(fmt.Sprintf("## Symbol index\n\n%d key types and functions. [Full index →](./symbol-index.md)\n\n", artifacts.symbolCount))
+	}
+	if !cfg.noChurn && artifacts.hasChurn {
+		sb.WriteString("## Recent activity\n\nCommit frequency by directory (90 days). [Full analysis →](./churn.md)\n\n")
+	}
+	if !cfg.noRecipes && artifacts.hasRecipes {
+		sb.WriteString("## Modification recipes\n\nCommon change patterns derived from git history. [Full recipes →](./recipes.md)\n\n")
+	}
+	if !cfg.noTraces && artifacts.hasTraces {
+		sb.WriteString("## Entry point traces\n\nEnd-to-end execution flows through the codebase. [Full traces →](./traces.md)\n\n")
+	}
+	sb.WriteString("---\n\n")
 
 	for _, d := range topLevel {
 		sb.WriteString(fmt.Sprintf("## %s\n\n", d))
@@ -2036,7 +2144,15 @@ func doClean(cfg config) {
 		return nil
 	})
 
-	for _, name := range []string{"wiki.md", "index.html"} {
+	for _, name := range []string{
+		"wiki.md", "index.html",
+		"deps-graph.md", "deps-graph.html",
+		"file-index.md", "file-index.html",
+		"symbol-index.md", "symbol-index.html",
+		"recipes.md", "recipes.html",
+		"traces.md", "traces.html",
+		"churn.md", "churn.html",
+	} {
 		p := filepath.Join(cfg.wikiRoot, name)
 		if data, err := os.ReadFile(p); err == nil && strings.Contains(string(data), "wikigen") {
 			os.Remove(p)
