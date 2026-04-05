@@ -939,6 +939,54 @@ type apiResponse struct {
 	} `json:"error"`
 }
 
+func callLLM(apiKey, systemPrompt, userPrompt string) (string, error) {
+	reqBody := apiRequest{
+		Model:     llmModel,
+		MaxTokens: 2048,
+		System:    systemPrompt,
+		Messages: []apiMessage{
+			{Role: "user", Content: userPrompt},
+		},
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", apiVersion)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("API call failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
+	}
+	var apiResp apiResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return "", fmt.Errorf("unmarshal response: %w", err)
+	}
+	if apiResp.Error != nil {
+		return "", fmt.Errorf("API error: %s", apiResp.Error.Message)
+	}
+	var texts []string
+	for _, block := range apiResp.Content {
+		if block.Type == "text" {
+			texts = append(texts, block.Text)
+		}
+	}
+	return strings.Join(texts, "\n"), nil
+}
+
 func summarize(cfg config, b dirBundle) (string, error) {
 	prompt := buildPrompt(b)
 
@@ -998,58 +1046,7 @@ Guidelines:
 - Use relative file links for files in this directory.
 - Omit any section that has no meaningful content (e.g., skip Configuration if there are no config knobs).`)
 
-	reqBody := apiRequest{
-		Model:     llmModel,
-		MaxTokens: 2048,
-		System:    sysPrompt.String(),
-		Messages: []apiMessage{
-			{Role: "user", Content: prompt},
-		},
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", cfg.apiKey)
-	req.Header.Set("anthropic-version", apiVersion)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("API call failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var apiResp apiResponse
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return "", fmt.Errorf("unmarshal response: %w", err)
-	}
-	if apiResp.Error != nil {
-		return "", fmt.Errorf("API error: %s", apiResp.Error.Message)
-	}
-
-	var texts []string
-	for _, block := range apiResp.Content {
-		if block.Type == "text" {
-			texts = append(texts, block.Text)
-		}
-	}
-	return strings.Join(texts, "\n"), nil
+	return callLLM(cfg.apiKey, sysPrompt.String(), prompt)
 }
 
 func buildPrompt(b dirBundle) string {
@@ -1272,6 +1269,317 @@ func writeHTMLPage(outPath, title, mdContent, rel string, childDirs []string) er
 }
 
 // ---------------------------------------------------------------------------
+// Summary parsing engine
+// ---------------------------------------------------------------------------
+
+type depEdge struct {
+	Dir  string
+	Note string
+}
+
+type fileIndexEntry struct {
+	Name string
+	Dir  string
+	Desc string
+	Lang string
+}
+
+type symbolEntry struct {
+	Name     string
+	Kind     string
+	Location string
+	Dir      string
+}
+
+func extractSection(summary, heading string) string {
+	marker := "## " + heading
+	idx := strings.Index(summary, marker)
+	if idx < 0 {
+		return ""
+	}
+	start := idx + len(marker)
+	if nl := strings.Index(summary[start:], "\n"); nl >= 0 {
+		start += nl + 1
+	} else {
+		return ""
+	}
+	rest := summary[start:]
+	end := strings.Index(rest, "\n## ")
+	if end >= 0 {
+		return strings.TrimSpace(rest[:end])
+	}
+	return strings.TrimSpace(rest)
+}
+
+func parseDependencies(summary, dir string) (imports []depEdge, importedBy []depEdge) {
+	section := extractSection(summary, "Dependencies")
+	if section == "" {
+		return
+	}
+	for _, line := range strings.Split(section, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "- ")
+		line = strings.TrimPrefix(line, "* ")
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "imports:") || strings.HasPrefix(lower, "imports ") {
+			note := strings.TrimSpace(line[len("imports"):])
+			note = strings.TrimPrefix(note, ":")
+			note = strings.TrimSpace(note)
+			imports = append(imports, depEdge{Dir: dir, Note: note})
+		} else if strings.HasPrefix(lower, "imported by:") || strings.HasPrefix(lower, "imported by ") {
+			note := strings.TrimSpace(line[len("imported by"):])
+			note = strings.TrimPrefix(note, ":")
+			note = strings.TrimSpace(note)
+			importedBy = append(importedBy, depEdge{Dir: dir, Note: note})
+		}
+	}
+	return
+}
+
+var keyFilePattern = regexp.MustCompile(`\[([^\]]+)\]\(\./([^)]+)\)\s*[-—]\s*(.+)`)
+
+func parseKeyFiles(summary, dir string) []fileIndexEntry {
+	section := extractSection(summary, "Key files")
+	if section == "" {
+		return nil
+	}
+	var results []fileIndexEntry
+	for _, line := range strings.Split(section, "\n") {
+		m := keyFilePattern.FindStringSubmatch(line)
+		if m != nil {
+			results = append(results, fileIndexEntry{
+				Name: m[1],
+				Dir:  dir,
+				Desc: strings.TrimSpace(m[3]),
+			})
+		}
+	}
+	return results
+}
+
+func parseSymbols(summary, dir string) []symbolEntry {
+	section := extractSection(summary, "Key types and interfaces")
+	if section == "" {
+		return nil
+	}
+	var results []symbolEntry
+	for _, line := range strings.Split(section, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || (!strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "*")) {
+			continue
+		}
+		line = strings.TrimPrefix(line, "- ")
+		line = strings.TrimPrefix(line, "* ")
+		entry := symbolEntry{Dir: dir}
+		if idx := strings.Index(line, "`"); idx >= 0 {
+			end := strings.Index(line[idx+1:], "`")
+			if end >= 0 {
+				name := line[idx+1 : idx+1+end]
+				entry.Name = name
+				lower := strings.ToLower(line)
+				switch {
+				case strings.Contains(lower, "interface"):
+					entry.Kind = "interface"
+				case strings.Contains(lower, "struct") || strings.Contains(lower, "type"):
+					entry.Kind = "type"
+				case strings.Contains(name, "("):
+					entry.Kind = "func"
+				default:
+					entry.Kind = "type"
+				}
+				entry.Location = dir + "/"
+				results = append(results, entry)
+			}
+		}
+	}
+	return results
+}
+
+func parseBoundary(summary string) string {
+	section := extractSection(summary, "Boundary")
+	if section == "" {
+		return ""
+	}
+	lower := strings.ToLower(section)
+	switch {
+	case strings.Contains(lower, "entry point"):
+		return "entry point"
+	case strings.Contains(lower, "internal"):
+		return "internal"
+	case strings.Contains(lower, "public"):
+		return "public"
+	default:
+		return ""
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Git analysis
+// ---------------------------------------------------------------------------
+
+type coChangeCluster struct {
+	Files []string
+	Count int
+}
+
+type churnEntry struct {
+	Dir   string
+	Count int
+	Level string
+}
+
+func analyzeCoChanges(repoRoot string) ([]coChangeCluster, error) {
+	if _, err := os.Stat(filepath.Join(repoRoot, ".git")); err != nil {
+		return nil, nil
+	}
+	cmd := exec.Command("git", "-C", repoRoot, "log", "--pretty=format:%H", "--since=1y", "-500")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, nil
+	}
+	hashes := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(hashes) < 50 {
+		return nil, nil
+	}
+
+	type filePair struct{ a, b string }
+	pairCount := make(map[filePair]int)
+
+	for _, hash := range hashes {
+		cmd := exec.Command("git", "-C", repoRoot, "diff-tree", "--no-commit-id", "--name-only", "-r", hash)
+		out, err := cmd.Output()
+		if err != nil {
+			continue
+		}
+		var eligible []string
+		for _, f := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if f != "" && detectLanguage(filepath.Base(f)) != "" {
+				eligible = append(eligible, f)
+			}
+		}
+		for i := 0; i < len(eligible); i++ {
+			for j := i + 1; j < len(eligible); j++ {
+				a, b := eligible[i], eligible[j]
+				if a > b {
+					a, b = b, a
+				}
+				pairCount[filePair{a, b}]++
+			}
+		}
+	}
+
+	type scoredPair struct {
+		a, b  string
+		count int
+	}
+	var pairs []scoredPair
+	for p, c := range pairCount {
+		if c >= 3 {
+			pairs = append(pairs, scoredPair{p.a, p.b, c})
+		}
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		return pairs[i].count > pairs[j].count
+	})
+
+	used := make(map[string]bool)
+	var clusters []coChangeCluster
+	for _, p := range pairs {
+		if used[p.a] || used[p.b] {
+			continue
+		}
+		cluster := coChangeCluster{Files: []string{p.a, p.b}, Count: p.count}
+		used[p.a] = true
+		used[p.b] = true
+		for _, p2 := range pairs {
+			if len(cluster.Files) >= 8 {
+				break
+			}
+			candidate := ""
+			if !used[p2.a] && used[p2.b] {
+				candidate = p2.a
+			} else if used[p2.a] && !used[p2.b] {
+				candidate = p2.b
+			}
+			if candidate == "" {
+				continue
+			}
+			fits := true
+			for _, existing := range cluster.Files {
+				a, b := candidate, existing
+				if a > b {
+					a, b = b, a
+				}
+				if pairCount[filePair{a, b}] < 3 {
+					fits = false
+					break
+				}
+			}
+			if fits {
+				cluster.Files = append(cluster.Files, candidate)
+				used[candidate] = true
+			}
+		}
+		clusters = append(clusters, cluster)
+		if len(clusters) >= 15 {
+			break
+		}
+	}
+	return clusters, nil
+}
+
+func analyzeChurn(repoRoot string) ([]churnEntry, error) {
+	if _, err := os.Stat(filepath.Join(repoRoot, ".git")); err != nil {
+		return nil, nil
+	}
+	cmd := exec.Command("git", "-C", repoRoot, "log", "--since=90d", "--name-only", "--pretty=format:")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, nil
+	}
+	dirCount := make(map[string]int)
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		dir := filepath.Dir(line)
+		if dir == "." {
+			continue
+		}
+		parts := strings.SplitN(dir, string(os.PathSeparator), 3)
+		if len(parts) >= 2 {
+			dir = filepath.Join(parts[0], parts[1])
+		} else {
+			dir = parts[0]
+		}
+		dirCount[dir]++
+	}
+	if len(dirCount) == 0 {
+		return nil, nil
+	}
+	var entries []churnEntry
+	for dir, count := range dirCount {
+		entries = append(entries, churnEntry{Dir: dir, Count: count})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Count > entries[j].Count
+	})
+	for i := range entries {
+		pct := float64(i) / float64(len(entries))
+		switch {
+		case pct < 0.2:
+			entries[i].Level = "high"
+		case pct >= 0.6:
+			entries[i].Level = "low"
+		default:
+			entries[i].Level = "medium"
+		}
+	}
+	return entries, nil
+}
+
+// ---------------------------------------------------------------------------
 // Root-level project summary
 // ---------------------------------------------------------------------------
 
@@ -1285,10 +1593,8 @@ func summarizeRoot(apiKey string, topDirs []string, summaries map[string]string)
 		}
 	}
 
-	reqBody := apiRequest{
-		Model:     llmModel,
-		MaxTokens: 2048,
-		System: `You are writing the root page of a codebase wiki that an LLM will use to understand and navigate code for tasks.
+	return callLLM(apiKey,
+		`You are writing the root page of a codebase wiki that an LLM will use to understand and navigate code for tasks.
 
 Given summaries of all top-level directories, produce:
 
@@ -1311,54 +1617,239 @@ A bullet list mapping task categories to specific directories. Be specific — l
 Cover at least 10 common task categories.
 
 Be specific and accurate. Do not add a Contents listing — that will be generated separately.`,
-		Messages: []apiMessage{
-			{Role: "user", Content: sb.String()},
-		},
-	}
+		sb.String())
+}
 
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
-	}
+// ---------------------------------------------------------------------------
+// Recipe and trace generation
+// ---------------------------------------------------------------------------
 
-	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+func generateRecipes(cfg config, clusters []coChangeCluster, summaries map[string]string) (string, error) {
+	if len(clusters) == 0 {
+		return "", nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("anthropic-version", apiVersion)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("API call failed: %w", err)
+	var sb strings.Builder
+	sb.WriteString("## Co-change clusters from git history\n\n")
+	for i, c := range clusters {
+		sb.WriteString(fmt.Sprintf("### Cluster %d (co-occurred in %d+ commits)\n", i+1, c.Count))
+		for _, f := range c.Files {
+			sb.WriteString(fmt.Sprintf("- `%s`\n", f))
+		}
+		sb.WriteString("\n")
 	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var apiResp apiResponse
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return "", fmt.Errorf("unmarshal response: %w", err)
-	}
-	if apiResp.Error != nil {
-		return "", fmt.Errorf("API error: %s", apiResp.Error.Message)
-	}
-
-	var texts []string
-	for _, block := range apiResp.Content {
-		if block.Type == "text" {
-			texts = append(texts, block.Text)
+	sb.WriteString("## Directory summaries (for context)\n\n")
+	for dir, summary := range summaries {
+		overview := extractSection(summary, "Overview")
+		if overview != "" {
+			sb.WriteString(fmt.Sprintf("### %s/\n%s\n\n", dir, overview))
 		}
 	}
-	return strings.Join(texts, "\n"), nil
+	return callLLM(cfg.apiKey,
+		`You are writing modification recipes for a codebase wiki. Given file co-change clusters from git history and directory summaries, produce 10-15 modification recipes.
+
+Each recipe should have:
+1. A descriptive name as an H2 heading (e.g., "## Add a new API endpoint")
+2. A bullet list of the files involved, with a one-line note per file on what to change there
+3. Use relative paths from the repo root
+
+Focus on the most common and useful modification patterns. Name recipes after the task ("Add a new ...", "Change how ...", "Fix ..."), not the files.
+
+Output markdown only. No preamble.`,
+		sb.String())
+}
+
+func generateTraces(cfg config, summaries map[string]string) (string, error) {
+	var sb strings.Builder
+	sb.WriteString("## Directory summaries\n\n")
+	for dir, summary := range summaries {
+		overview := extractSection(summary, "Overview")
+		howItWorks := extractSection(summary, "How it works")
+		keyFiles := extractSection(summary, "Key files")
+		if overview != "" {
+			sb.WriteString(fmt.Sprintf("### %s/\n%s\n\n", dir, overview))
+		}
+		if howItWorks != "" {
+			sb.WriteString("**How it works:** " + howItWorks + "\n\n")
+		}
+		if keyFiles != "" {
+			sb.WriteString("**Key files:**\n" + keyFiles + "\n\n")
+		}
+	}
+	return callLLM(cfg.apiKey,
+		`You are writing entry point traces for a codebase wiki. Given directory summaries, identify the 2-3 most important entry points (main() functions, HTTP server bootstrap, CLI command dispatch, event listeners) and trace their execution end-to-end through the codebase.
+
+For each trace:
+1. Use an H2 heading with the trace name (e.g., "## HTTP request → response")
+2. Walk through the flow step by step, naming specific files and functions at each step
+3. Use → arrows to show the flow direction
+4. Keep it concrete — name actual files, not abstract concepts
+
+Output markdown only. No preamble.`,
+		sb.String())
+}
+
+// ---------------------------------------------------------------------------
+// Root artifact writers
+// ---------------------------------------------------------------------------
+
+func writeDepsGraph(cfg config, summaries map[string]string) (int, error) {
+	boundaries := make(map[string]string)
+	for dir, summary := range summaries {
+		if b := parseBoundary(summary); b != "" {
+			boundaries[dir] = b
+		}
+	}
+	var dirs []string
+	for dir := range summaries {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+
+	var sb strings.Builder
+	sb.WriteString(generatedTag + "\n")
+	sb.WriteString("# Dependency Graph\n\nDirectory-to-directory dependencies extracted from summaries.\n\n")
+	sb.WriteString("```\n")
+	edgeCount := 0
+	for _, dir := range dirs {
+		imports, _ := parseDependencies(summaries[dir], dir)
+		if len(imports) == 0 {
+			continue
+		}
+		label := dir
+		if b, ok := boundaries[dir]; ok {
+			label = fmt.Sprintf("%s (%s)", dir, b)
+		}
+		sb.WriteString(fmt.Sprintf("%s → %s\n", label, imports[0].Note))
+		edgeCount++
+	}
+	sb.WriteString("```\n")
+	md := sb.String()
+	if err := os.WriteFile(filepath.Join(cfg.wikiRoot, "deps-graph.md"), []byte(md), 0644); err != nil {
+		return 0, err
+	}
+	return edgeCount, writeHTMLPage(filepath.Join(cfg.wikiRoot, "deps-graph.html"), "Dependency Graph", md, "", nil)
+}
+
+func writeFileIndex(cfg config, dirs []string, summaries map[string]string) (int, error) {
+	descMap := make(map[string]map[string]string)
+	for dir, summary := range summaries {
+		for _, fe := range parseKeyFiles(summary, dir) {
+			if descMap[dir] == nil {
+				descMap[dir] = make(map[string]string)
+			}
+			descMap[dir][fe.Name] = fe.Desc
+		}
+	}
+	var entries []fileIndexEntry
+	for _, rel := range dirs {
+		abs := filepath.Join(cfg.repoRoot, rel)
+		dirEntries, err := os.ReadDir(abs)
+		if err != nil {
+			continue
+		}
+		for _, e := range dirEntries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			lang := detectLanguage(name)
+			if lang == "" {
+				continue
+			}
+			desc := ""
+			if dm, ok := descMap[rel]; ok {
+				desc = dm[name]
+			}
+			entries = append(entries, fileIndexEntry{Name: name, Dir: rel, Desc: desc, Lang: lang})
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Name != entries[j].Name {
+			return entries[i].Name < entries[j].Name
+		}
+		return entries[i].Dir < entries[j].Dir
+	})
+	var sb strings.Builder
+	sb.WriteString(generatedTag + "\n")
+	sb.WriteString(fmt.Sprintf("# File Index\n\n%d source files across %d directories.\n\n", len(entries), len(dirs)))
+	sb.WriteString("| File | Directory | Language | Description |\n")
+	sb.WriteString("|------|-----------|----------|-------------|\n")
+	for _, e := range entries {
+		desc := e.Desc
+		if desc == "" {
+			desc = "—"
+		}
+		sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n", e.Name, e.Dir, e.Lang, desc))
+	}
+	md := sb.String()
+	if err := os.WriteFile(filepath.Join(cfg.wikiRoot, "file-index.md"), []byte(md), 0644); err != nil {
+		return 0, err
+	}
+	return len(entries), writeHTMLPage(filepath.Join(cfg.wikiRoot, "file-index.html"), "File Index", md, "", nil)
+}
+
+func writeSymbolIndex(cfg config, summaries map[string]string) (int, error) {
+	var allSymbols []symbolEntry
+	for dir, summary := range summaries {
+		allSymbols = append(allSymbols, parseSymbols(summary, dir)...)
+	}
+	sort.Slice(allSymbols, func(i, j int) bool {
+		return allSymbols[i].Name < allSymbols[j].Name
+	})
+	var sb strings.Builder
+	sb.WriteString(generatedTag + "\n")
+	sb.WriteString(fmt.Sprintf("# Symbol Index\n\n%d key types and functions.\n\n", len(allSymbols)))
+	sb.WriteString("| Symbol | Kind | Location |\n")
+	sb.WriteString("|--------|------|----------|\n")
+	for _, s := range allSymbols {
+		sb.WriteString(fmt.Sprintf("| `%s` | %s | %s |\n", s.Name, s.Kind, s.Location))
+	}
+	md := sb.String()
+	if err := os.WriteFile(filepath.Join(cfg.wikiRoot, "symbol-index.md"), []byte(md), 0644); err != nil {
+		return 0, err
+	}
+	return len(allSymbols), writeHTMLPage(filepath.Join(cfg.wikiRoot, "symbol-index.html"), "Symbol Index", md, "", nil)
+}
+
+func writeChurn(cfg config, entries []churnEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	sb.WriteString(generatedTag + "\n")
+	sb.WriteString("# Recent Activity\n\nCommit frequency by directory over the last 90 days.\n\n")
+	sb.WriteString("| Directory | Commits (90d) | Churn |\n")
+	sb.WriteString("|-----------|---------------|-------|\n")
+	for _, e := range entries {
+		sb.WriteString(fmt.Sprintf("| %s | %d | %s |\n", e.Dir, e.Count, e.Level))
+	}
+	md := sb.String()
+	if err := os.WriteFile(filepath.Join(cfg.wikiRoot, "churn.md"), []byte(md), 0644); err != nil {
+		return err
+	}
+	return writeHTMLPage(filepath.Join(cfg.wikiRoot, "churn.html"), "Recent Activity", md, "", nil)
+}
+
+func writeRecipesFile(cfg config, content string) error {
+	if content == "" {
+		return nil
+	}
+	md := fmt.Sprintf("%s\n# Modification Recipes\n\nCommon change patterns derived from git history.\n\n%s\n", generatedTag, content)
+	if err := os.WriteFile(filepath.Join(cfg.wikiRoot, "recipes.md"), []byte(md), 0644); err != nil {
+		return err
+	}
+	return writeHTMLPage(filepath.Join(cfg.wikiRoot, "recipes.html"), "Modification Recipes", md, "", nil)
+}
+
+func writeTracesFile(cfg config, content string) error {
+	if content == "" {
+		return nil
+	}
+	md := fmt.Sprintf("%s\n# Entry Point Traces\n\nEnd-to-end execution flows through the codebase.\n\n%s\n", generatedTag, content)
+	if err := os.WriteFile(filepath.Join(cfg.wikiRoot, "traces.md"), []byte(md), 0644); err != nil {
+		return err
+	}
+	return writeHTMLPage(filepath.Join(cfg.wikiRoot, "traces.html"), "Entry Point Traces", md, "", nil)
 }
 
 // ---------------------------------------------------------------------------
