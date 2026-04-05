@@ -6,6 +6,13 @@ This project has an auto-generated codebase wiki. **Read the wiki before reading
 
 - **Root**: `{{WIKI_PATH}}`
 - **Directory summaries**: `{{WIKI_DIR}}/{dir}/SUMMARY.md` (one per directory in the codebase)
+- **Root artifacts** (all in `{{WIKI_DIR}}/`):
+  - `deps-graph.md` — directory-to-directory dependency graph
+  - `file-index.md` — flat file lookup (name → directory → description)
+  - `symbol-index.md` — key types, functions, interfaces and their locations
+  - `recipes.md` — common modification patterns (which files change together)
+  - `traces.md` — end-to-end execution flows from entry points
+  - `churn.md` — recently active directories (last 90 days)
 - All paths inside the wiki are relative to `{{WIKI_DIR}}/`
 
 ## How to navigate
@@ -17,6 +24,7 @@ Read `{{WIKI_PATH}}`. It contains:
 - An **architecture snapshot** (how major pieces connect)
 - A **navigation guide** that maps task categories to directories
 - An **annotated contents** listing with one-line descriptions
+- Links to root artifacts (dependency graph, file index, symbol index, etc.)
 
 ### Step 2: Match your task to directories
 
@@ -28,6 +36,9 @@ Each `SUMMARY.md` contains:
 - What the directory is responsible for
 - Key files with one-line descriptions
 - Important types, functions, and interfaces
+- Dependencies (what it imports, what imports it)
+- Boundary classification (public API, internal, or entry point)
+- Testing patterns (where tests live, what style they use)
 - A "When to look here" section
 - Child directory descriptions
 
@@ -60,6 +71,18 @@ Task: "Add a new CLI subcommand that lists active policies"
 ```
 
 Total files read: 4 (wiki) + 2 (source) = 6, instead of searching the entire codebase.
+
+## When to use root artifacts
+
+Use the root artifacts for specific tasks before diving into source:
+
+- **"What files do I change for X?"** → Read `{{WIKI_DIR}}/recipes.md` for common modification patterns
+- **"Where is this file/type?"** → Read `{{WIKI_DIR}}/file-index.md` or `{{WIKI_DIR}}/symbol-index.md` for instant lookup
+- **"What depends on this package?"** → Read `{{WIKI_DIR}}/deps-graph.md` to assess blast radius
+- **"How does a request flow through the system?"** → Read `{{WIKI_DIR}}/traces.md` for end-to-end paths
+- **"Is this area actively changing?"** → Read `{{WIKI_DIR}}/churn.md` to check recent activity
+- **"Is this a public API or internal?"** → Check the `## Boundary` section in the relevant SUMMARY.md
+- **"How should I write tests here?"** → Check the `## Testing` section in the relevant SUMMARY.md
 
 ## Multi-directory tasks
 
