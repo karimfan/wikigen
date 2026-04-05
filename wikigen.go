@@ -344,6 +344,28 @@ func main() {
 	var artifacts wikiArtifacts
 	artifacts.dirCount = len(dirs)
 
+	if cfg.dryRun {
+		// Print what would be generated.
+		if !cfg.noDepsGraph {
+			fmt.Fprintln(os.Stderr, "(dry-run) Would generate deps-graph.md")
+		}
+		if !cfg.noFileIndex {
+			fmt.Fprintln(os.Stderr, "(dry-run) Would generate file-index.md")
+		}
+		if !cfg.noSymbolIndex {
+			fmt.Fprintln(os.Stderr, "(dry-run) Would generate symbol-index.md")
+		}
+		if !cfg.noChurn {
+			fmt.Fprintln(os.Stderr, "(dry-run) Would generate churn.md")
+		}
+		if !cfg.noRecipes {
+			fmt.Fprintln(os.Stderr, "(dry-run) Would generate recipes.md (1 LLM call)")
+		}
+		if !cfg.noTraces {
+			fmt.Fprintln(os.Stderr, "(dry-run) Would generate traces.md (1 LLM call)")
+		}
+	}
+
 	if !cfg.dryRun {
 		// Write dependency graph.
 		if !cfg.noDepsGraph {
@@ -589,14 +611,14 @@ Flags:
   --json               Emit line-delimited JSON progress events on stderr
   --dry-run            Show what would be summarized without calling the API
   --clean              Remove all generated files and manifest from wiki folder
-  --no-deps-graph      Omit dependency graph from generated summaries
-  --no-file-index      Omit file index from generated summaries
-  --no-recipes         Omit recipes from generated summaries
-  --no-traces          Omit traces from generated summaries
-  --no-boundaries      Omit boundary section from generated summaries
-  --no-test-hints      Omit testing section from generated summaries
-  --no-symbol-index    Omit symbol index from generated summaries
-  --no-churn           Omit churn data from generated summaries
+  --no-deps-graph      Skip dependency graph generation (deps-graph.md)
+  --no-file-index      Skip file index generation (file-index.md)
+  --no-recipes         Skip modification recipes (recipes.md, saves 1 LLM call)
+  --no-traces          Skip entry point traces (traces.md, saves 1 LLM call)
+  --no-boundaries      Omit ## Boundary section from directory summaries
+  --no-test-hints      Omit ## Testing section from directory summaries
+  --no-symbol-index    Skip symbol index generation (symbol-index.md)
+  --no-churn           Skip churn overlay generation (churn.md)
   --help               Show this help message`)
 }
 
@@ -1474,7 +1496,18 @@ func parseSymbols(summary, dir string) []symbolEntry {
 				default:
 					entry.Kind = "type"
 				}
+				// Try to find file reference like "in `filename.go`" or "(filename.go)".
 				entry.Location = dir + "/"
+				restOfLine := line[idx+1+end+1:]
+				if fIdx := strings.Index(restOfLine, "`"); fIdx >= 0 {
+					fEnd := strings.Index(restOfLine[fIdx+1:], "`")
+					if fEnd >= 0 {
+						ref := restOfLine[fIdx+1 : fIdx+1+fEnd]
+						if strings.Contains(ref, ".") && !strings.Contains(ref, " ") {
+							entry.Location = dir + "/" + ref
+						}
+					}
+				}
 				results = append(results, entry)
 			}
 		}
@@ -1491,10 +1524,10 @@ func parseBoundary(summary string) string {
 	switch {
 	case strings.Contains(lower, "entry point"):
 		return "entry point"
-	case strings.Contains(lower, "internal"):
-		return "internal"
 	case strings.Contains(lower, "public"):
 		return "public"
+	case strings.Contains(lower, "internal"):
+		return "internal"
 	default:
 		return ""
 	}
@@ -1619,6 +1652,13 @@ func analyzeChurn(repoRoot string) ([]churnEntry, error) {
 	if _, err := os.Stat(filepath.Join(repoRoot, ".git")); err != nil {
 		return nil, nil
 	}
+	// Check we have at least 30 days of history.
+	firstCmd := exec.Command("git", "-C", repoRoot, "log", "--since=30d", "--oneline", "-1")
+	firstOut, err := firstCmd.Output()
+	if err != nil || strings.TrimSpace(string(firstOut)) == "" {
+		return nil, nil // not enough history
+	}
+
 	cmd := exec.Command("git", "-C", repoRoot, "log", "--since=90d", "--name-only", "--pretty=format:")
 	out, err := cmd.Output()
 	if err != nil {
@@ -1806,8 +1846,13 @@ func writeDepsGraph(cfg config, summaries map[string]string) (int, error) {
 		if b, ok := boundaries[dir]; ok {
 			label = fmt.Sprintf("%s (%s)", dir, b)
 		}
-		sb.WriteString(fmt.Sprintf("%s → %s\n", label, imports[0].Note))
-		edgeCount++
+		// Combine all import notes into one line.
+		var notes []string
+		for _, imp := range imports {
+			notes = append(notes, imp.Note)
+		}
+		sb.WriteString(fmt.Sprintf("%s → %s\n", label, strings.Join(notes, ", ")))
+		edgeCount += len(imports)
 	}
 	sb.WriteString("```\n")
 	md := sb.String()
