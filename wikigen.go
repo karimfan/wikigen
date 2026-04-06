@@ -99,6 +99,7 @@ type config struct {
 	noTestHints       bool
 	noSymbolIndex     bool
 	noChurn           bool
+	updateSkills      bool
 }
 
 type wikiArtifacts struct {
@@ -164,6 +165,12 @@ func main() {
 
 	if cfg.clean {
 		doClean(cfg)
+		return
+	}
+
+	if cfg.updateSkills {
+		writeSkillFiles(cfg)
+		fmt.Fprintln(os.Stderr, "Updated CLAUDE.md and AGENTS.md skill files.")
 		return
 	}
 
@@ -533,6 +540,8 @@ func parseArgs() config {
 			cfg.jsonProgress = true
 		case a == "--no-default-excludes":
 			cfg.noDefaultExcludes = true
+		case a == "--update-skills":
+			cfg.updateSkills = true
 		case a == "--no-deps-graph":
 			cfg.noDepsGraph = true
 		case a == "--no-file-index":
@@ -611,6 +620,7 @@ Flags:
   --json               Emit line-delimited JSON progress events on stderr
   --dry-run            Show what would be summarized without calling the API
   --clean              Remove all generated files and manifest from wiki folder
+  --update-skills      Update CLAUDE.md and AGENTS.md in the repo without scanning
   --no-deps-graph      Skip dependency graph generation (deps-graph.md)
   --no-file-index      Skip file index generation (file-index.md)
   --no-recipes         Skip modification recipes (recipes.md, saves 1 LLM call)
