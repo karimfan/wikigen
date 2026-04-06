@@ -23,7 +23,7 @@ type consultConfig struct {
 }
 
 func loadConsultConfig(repoRoot string) *consultConfig {
-	path := filepath.Join(repoRoot, ".consult.json")
+	path := filepath.Join(repoRoot, ".consult.slack.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil

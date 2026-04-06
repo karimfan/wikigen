@@ -26,18 +26,30 @@ You need a Slack app to send messages. This is a one-time setup:
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App** → **From scratch**
 2. Name it (e.g., "Consult") and select your workspace
-3. Go to **OAuth & Permissions** → scroll to **Bot Token Scopes** → add:
-   - `chat:write` — send messages
-   - `users:read.email` — look up users by git email
-   - `im:write` — open DM conversations
+3. Go to **OAuth & Permissions** → scroll to **Bot Token Scopes** → add all required scopes (see below)
 4. Click **Install to Workspace** and authorize
 5. Copy the **Bot User OAuth Token** (`xoxb-...`)
 6. Export it:
    ```bash
    export SLACK_BOT_TOKEN=xoxb-your-token-here
    ```
+7. **Invite the bot** to any channels you want to post to: type `/invite @YourBotName` in the channel
 
 You can skip this entirely if you only use `consult who` or `--dry-run`.
+
+### Required OAuth scopes
+
+| Scope | Used by | Purpose |
+|-------|---------|---------|
+| `chat:write` | `ask`, `propose` | Send consultation messages to channels and DMs |
+| `users:read.email` | `ask`, `propose` | Look up Slack users by their git commit email |
+| `im:write` | `ask`, `propose` | Open direct message conversations with experts |
+| `channels:history` | `check` | Read replies in public channels |
+| `im:history` | `check` | Read replies in DM conversations |
+
+If you only post to channels (via `default_channel` in config), you don't need `im:write` or `im:history`. If you only DM experts, you don't need `channels:history`.
+
+After adding or changing scopes, you must **Reinstall to Workspace** and copy the new token.
 
 ## Commands
 
@@ -168,21 +180,96 @@ The top 3 experts are returned. For directories, the tool analyzes up to 20 rece
 
 ## Identity resolution
 
-**Primary**: Slack `users.lookupByEmail` — looks up the expert's git commit email in Slack. Zero config when emails match.
+consult needs to map git commit emails to Slack users. It tries two methods in order:
 
-**Fallback**: Optional `.consult.json` at repo root for overrides when emails don't match:
+1. **Slack email lookup** (automatic): Calls the Slack `users.lookupByEmail` API with the git commit email. Works when the developer's git email matches their Slack profile email. Zero config needed.
+
+2. **Config file override** (manual): Reads `.consult.slack.json` from the repo root. Use this when git emails don't match Slack — personal emails, contractor accounts, bots, or any mismatch.
+
+If neither method resolves a user, consult prints who it found in git and suggests adding them to the config file.
+
+## Configuration: `.consult.slack.json`
+
+Place a `.consult.slack.json` file at the root of the repo you're running consult against. This file is optional — you only need it when automatic Slack email lookup doesn't work.
+
+### Full example
 
 ```json
 {
   "user_map": {
-    "alice-old@personal.com": "U12345",
-    "bob@contractor.io": "U67890"
+    "alice-old@personal.com": "U12345ABC",
+    "bob@contractor.io": "U67890DEF",
+    "ci-bot@github.com": "UBOT00001",
+    "outtatime@gmail.com": "UJT3HL0FJ"
   },
-  "default_channel": "C_TEAM_CHANNEL"
+  "default_channel": "C0AR4GH7938"
 }
 ```
 
-If neither lookup nor config resolves a user, consult reports who it found in git but couldn't map to Slack, and suggests adding them to `.consult.json`.
+### Fields
+
+#### `user_map` — Git email to Slack user ID mapping
+
+Maps git author emails to Slack user IDs. The key is the exact email that appears in `git log --format=%ae`, and the value is the Slack user ID.
+
+**When you need this:**
+- A developer commits with a personal email (`alice@gmail.com`) but their Slack uses a work email (`alice@company.com`)
+- A contractor uses a non-company email that Slack can't look up
+- Bot accounts or CI systems that commit code
+- Any time `consult ask` fails with "could not resolve Slack ID"
+
+**How to find a Slack user ID:**
+- In Slack, click on the person's profile → click the `⋮` menu → **Copy member ID**
+- The ID looks like `U01ABCDEF`
+
+**How to find git emails:**
+- Run `consult who --file <path>` — the Email column shows what git uses
+- Or: `git log --format="%ae" -- <path> | sort -u`
+
+#### `default_channel` — Where to post messages
+
+By default, consult sends a DM to the top expert. Set `default_channel` to post to a shared channel instead. This is useful when:
+- The bot can't DM users (Slack permissions or free plan restrictions)
+- You want the team to see consultation requests, not just the individual expert
+- You want to centralize code questions in one channel
+
+**How to find a channel ID:**
+- In Slack, right-click the channel name → **View channel details** → scroll to the bottom → the ID starts with `C`
+- Or use the Slack web app — the channel ID is in the URL: `slack.com/archives/C0AR4GH7938`
+
+**Important:** The bot must be invited to the channel. Type `/invite @YourBotName` in the channel.
+
+### Minimal examples
+
+**Just user mappings** (DMs, no default channel):
+```json
+{
+  "user_map": {
+    "dev@personal.com": "U12345ABC"
+  }
+}
+```
+
+**Just a default channel** (no user mappings, rely on email lookup):
+```json
+{
+  "default_channel": "C0AR4GH7938"
+}
+```
+
+**Both** (override specific users, post to channel):
+```json
+{
+  "user_map": {
+    "dev@personal.com": "U12345ABC"
+  },
+  "default_channel": "C0AR4GH7938"
+}
+```
+
+### Gitignore
+
+You may want to add `.consult.slack.json` to `.gitignore` if it contains internal Slack IDs you don't want in version control. Alternatively, commit it so everyone on the team shares the same mappings.
 
 ## Session storage
 

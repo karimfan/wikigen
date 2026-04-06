@@ -176,7 +176,7 @@ func cmdAsk(args []string) {
 
 	if experts[0].SlackID == "" {
 		fmt.Fprintf(os.Stderr, "error: could not resolve Slack ID for top expert %s <%s>\n", experts[0].Name, experts[0].Email)
-		fmt.Fprintf(os.Stderr, "hint: add a mapping in .consult.json:\n")
+		fmt.Fprintf(os.Stderr, "hint: add a mapping in .consult.slack.json:\n")
 		fmt.Fprintf(os.Stderr, "  {\"user_map\": {\"%s\": \"U01XXXXXX\"}}\n", experts[0].Email)
 		os.Exit(1)
 	}
@@ -256,7 +256,7 @@ func cmdPropose(args []string) {
 
 	if experts[0].SlackID == "" {
 		fmt.Fprintf(os.Stderr, "error: could not resolve Slack ID for top expert %s <%s>\n", experts[0].Name, experts[0].Email)
-		fmt.Fprintf(os.Stderr, "hint: add a mapping in .consult.json:\n")
+		fmt.Fprintf(os.Stderr, "hint: add a mapping in .consult.slack.json:\n")
 		fmt.Fprintf(os.Stderr, "  {\"user_map\": {\"%s\": \"U01XXXXXX\"}}\n", experts[0].Email)
 		os.Exit(1)
 	}
