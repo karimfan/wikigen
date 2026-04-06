@@ -181,10 +181,18 @@ func cmdAsk(args []string) {
 		os.Exit(1)
 	}
 
-	channelID, err := openDM(token, experts[0].SlackID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error opening DM: %v\n", err)
-		os.Exit(1)
+	// Use default channel from config if available, otherwise DM the expert.
+	cfg := loadConsultConfig(root)
+	var channelID string
+	if cfg != nil && cfg.DefaultChannel != "" {
+		channelID = cfg.DefaultChannel
+	} else {
+		var err error
+		channelID, err = openDM(token, experts[0].SlackID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error opening DM: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	threadTS, err := postMessage(token, channelID, message)
@@ -253,10 +261,18 @@ func cmdPropose(args []string) {
 		os.Exit(1)
 	}
 
-	channelID, err := openDM(token, experts[0].SlackID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error opening DM: %v\n", err)
-		os.Exit(1)
+	// Use default channel from config if available, otherwise DM the expert.
+	cfg := loadConsultConfig(root)
+	var channelID string
+	if cfg != nil && cfg.DefaultChannel != "" {
+		channelID = cfg.DefaultChannel
+	} else {
+		var err error
+		channelID, err = openDM(token, experts[0].SlackID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error opening DM: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	threadTS, err := postMessage(token, channelID, message)
