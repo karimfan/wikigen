@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.svg" width="200" alt="foxhound logo">
+</p>
+
 # foxhound
 
 Tools that help LLM agents understand code before they modify it.

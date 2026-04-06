@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#e94560"/>
+      <stop offset="100%" style="stop-color:#c23152"/>
+    </linearGradient>
+    <linearGradient id="fox" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f5a623"/>
+      <stop offset="100%" style="stop-color:#e8912d"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="240" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="234" fill="none" stroke="#e94560" stroke-width="2" opacity="0.3"/>
+
+  <!-- Stylized foxhound head - geometric/minimal -->
+  <!-- Left ear -->
+  <polygon points="160,120 200,80 220,170" fill="url(#fox)"/>
+  <polygon points="170,125 200,92 215,160" fill="#d4901e" opacity="0.6"/>
+
+  <!-- Right ear -->
+  <polygon points="352,120 312,80 292,170" fill="url(#fox)"/>
+  <polygon points="342,125 312,92 297,160" fill="#d4901e" opacity="0.6"/>
+
+  <!-- Head shape -->
+  <ellipse cx="256" cy="210" rx="95" ry="85" fill="url(#fox)"/>
+
+  <!-- Snout -->
+  <ellipse cx="256" cy="280" rx="55" ry="45" fill="#f0c16b"/>
+
+  <!-- Nose -->
+  <ellipse cx="256" cy="268" rx="18" ry="13" fill="#2d2d2d"/>
+  <ellipse cx="252" cy="265" rx="5" ry="3" fill="#4a4a4a" opacity="0.5"/>
+
+  <!-- Eyes -->
+  <ellipse cx="220" cy="205" rx="16" ry="18" fill="#1a1a2e"/>
+  <ellipse cx="292" cy="205" rx="16" ry="18" fill="#1a1a2e"/>
+  <!-- Eye shine -->
+  <circle cx="225" cy="200" r="5" fill="white" opacity="0.8"/>
+  <circle cx="297" cy="200" r="5" fill="white" opacity="0.8"/>
+  <!-- Iris color -->
+  <ellipse cx="221" cy="207" rx="10" ry="12" fill="url(#accent)" opacity="0.7"/>
+  <ellipse cx="293" cy="207" rx="10" ry="12" fill="url(#accent)" opacity="0.7"/>
+
+  <!-- Mouth line -->
+  <path d="M 240,290 Q 256,302 272,290" fill="none" stroke="#2d2d2d" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- White chest/chin marking -->
+  <ellipse cx="256" cy="300" rx="30" ry="20" fill="#fef3e0" opacity="0.6"/>
+
+  <!-- Magnifying glass (the "search/track" element) -->
+  <circle cx="340" cy="330" r="40" fill="none" stroke="url(#accent)" stroke-width="8"/>
+  <line x1="370" y1="358" x2="400" y2="390" stroke="url(#accent)" stroke-width="10" stroke-linecap="round"/>
+  <!-- Glass shine -->
+  <path d="M 318,312 Q 325,305 335,308" fill="none" stroke="white" stroke-width="3" opacity="0.4" stroke-linecap="round"/>
+
+  <!-- Code brackets inside magnifying glass -->
+  <text x="325" y="340" font-family="monospace" font-size="28" font-weight="bold" fill="#e94560" opacity="0.8">&lt;/&gt;</text>
+
+  <!-- Text: FOXHOUND -->
+  <text x="256" y="430" font-family="system-ui, -apple-system, sans-serif" font-size="42" font-weight="800" fill="white" text-anchor="middle" letter-spacing="6">FOXHOUND</text>
+  <text x="256" y="458" font-family="system-ui, -apple-system, sans-serif" font-size="14" fill="#9ca3af" text-anchor="middle" letter-spacing="4">CODE INTELLIGENCE</text>
+</svg>
